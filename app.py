@@ -35,12 +35,18 @@ os.makedirs(RESULTS_FOLDER, exist_ok=True)
 try:
     logger.info("Loading AI models...")
 
-    damage_model = YOLO("Final_Damage/DamageTypebest.pt")  # YOLO model for damage type
-    severity_model = YOLO("Final_Damage/Severitybest.pt")  # YOLO model for severity
+    # YOLO models
+    damage_model = YOLO("Final_Damage/DamageTypebest.pt")  # Damage type detection
+    severity_model = YOLO("Final_Damage/Severitybest.pt")  # Severity detection
+
+    # Import gzip for compressed cost model
     import gzip
+
+    # Load gzipped cost model
     with gzip.open("Final_Damage/cost_model.pkl.gz", "rb") as f:
         cost_model = joblib.load(f)
-    # cost_model = joblib.load("Final_Damage/cost_model.pkl")  # ML model
+
+    # Load encoders and feature columns normally
     encoders = joblib.load("Final_Damage/label_encoders.pkl")  # Label encoders
     feature_cols = joblib.load("Final_Damage/feature_columns.pkl")  # Feature columns list
 
