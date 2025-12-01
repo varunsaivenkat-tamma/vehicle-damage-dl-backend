@@ -34,20 +34,18 @@ os.makedirs(RESULTS_FOLDER, exist_ok=True)
 # ============================
 try:
     logger.info("Loading AI models...")
-    
-    # Load YOLO models for damage detection and severity assessment
-    damage_model = YOLO("Final Damage/DamageTypebest.pt")
-    severity_model = YOLO("Final Damage/Severitybest.pt")
-    
-    # Load cost estimation model and encoders
-    cost_model = joblib.load("Final Damage/cost_model.pkl")
-    encoders = joblib.load("Final Damage/label_encoders.pkl")
-    feature_cols = joblib.load("Final Damage/feature_columns.pkl")
-    
-    logger.info("✅ All AI models loaded successfully!")
-    
+
+    damage_model = YOLO("Final_Damage/DamageTypebest.pt")  # YOLO model for damage type
+    severity_model = YOLO("Final_Damage/Severitybest.pt")  # YOLO model for severity
+
+    cost_model = joblib.load("Final_Damage/cost_model.pkl")  # ML model
+    encoders = joblib.load("Final_Damage/label_encoders.pkl")  # Label encoders
+    feature_cols = joblib.load("Final_Damage/feature_columns.pkl")  # Feature columns list
+
+    logger.info("All models loaded successfully.")
+
 except Exception as e:
-    logger.error(f"❌ Error loading models: {e}")
+    logger.error(f"Error loading models: {e}")
     raise e
 
 # ============================
