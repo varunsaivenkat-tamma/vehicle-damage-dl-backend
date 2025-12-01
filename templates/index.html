@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Car Damage Estimation</title>
+</head>
+<body>
+
+<h2>Upload Car Image</h2>
+
+<form action="/predict" method="POST" enctype="multipart/form-data">
+
+    <label>Upload Image:</label><br>
+    <input type="file" name="image" required><br><br>
+
+    <h3>Vehicle Details</h3>
+
+    Brand: <input type="text" name="brand" required><br><br>
+    Model: <input type="text" name="model" required><br><br>
+    Year: <input type="number" name="year" required><br><br>
+    
+    Fuel Type:
+    <select name="fuel">
+        <option>Petrol</option>
+        <option>Diesel</option>
+    </select><br><br>
+
+    Vehicle Type:
+    <select name="type">
+        <option>SUV</option>
+        <option>Sedan</option>
+        <option>Hatchback</option>
+    </select><br><br>
+
+    Color: <input type="text" name="color" required><br><br>
+
+    <button type="submit">Predict Damage & Cost</button>
+
+</form>
+
+</body>
+</html>

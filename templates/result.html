@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Damage Analysis Result</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            padding: 40px;
+        }
+        
+        h2 {
+            color: #333;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 3px solid #667eea;
+        }
+        
+        .section {
+            margin-bottom: 40px;
+        }
+        
+        .section-title {
+            color: #667eea;
+            font-size: 1.3em;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+        
+        .image-container {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        
+        .image-container img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            margin-bottom: 15px;
+        }
+        
+        .crops-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .crop-item {
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        
+        .crop-item img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        
+        .cost-list {
+            background: #f9f9f9;
+            border-radius: 8px;
+            padding: 20px;
+        }
+        
+        .cost-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            background: white;
+            margin-bottom: 10px;
+            border-radius: 6px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .cost-item:last-child {
+            margin-bottom: 0;
+        }
+        
+        .damage-info {
+            flex: 1;
+        }
+        
+        .damage-type {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .damage-severity {
+            font-size: 0.9em;
+            color: #999;
+        }
+        
+        .damage-severity.minor {
+            color: #4caf50;
+        }
+        
+        .damage-severity.moderate {
+            color: #ff9800;
+        }
+        
+        .damage-severity.severe {
+            color: #f44336;
+        }
+        
+        .cost-value {
+            font-size: 1.3em;
+            font-weight: 700;
+            color: #667eea;
+            min-width: 100px;
+            text-align: right;
+        }
+        
+        .total-cost-container {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
+            text-align: center;
+            margin-top: 30px;
+        }
+        
+        .total-cost-container h3 {
+            font-size: 1.2em;
+            margin-bottom: 10px;
+            opacity: 0.9;
+        }
+        
+        .total-cost-value {
+            font-size: 2.5em;
+            font-weight: 700;
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 15px;
+            margin-top: 30px;
+            justify-content: center;
+        }
+        
+        .btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 6px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-decoration: none;
+            display: inline-block;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+            border: 2px solid #ddd;
+        }
+        
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+        
+        .no-damages {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+            background: #f9f9f9;
+            border-radius: 8px;
+        }
+        
+        .no-damages-icon {
+            font-size: 3em;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Damage Analysis Result</h2>
+    
+    <div class="section">
+        <div class="section-title">Annotated Full Image</div>
+        <div class="image-container">
+            <img src="{{ annotated_image }}" alt="Annotated image with damage detection">
+        </div>
+    </div>
+
+    {% if crops %}
+    <div class="section">
+        <div class="section-title">Detected Damage Areas</div>
+        <div class="crops-grid">
+            {% for c in crops %}
+                <div class="crop-item">
+                    <img src="{{ c }}" alt="Damage crop">
+                </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="section">
+        <div class="section-title">Cost Estimation Breakdown</div>
+        {% if cost_results %}
+        <div class="cost-list">
+            {% for item in cost_results %}
+                <div class="cost-item">
+                    <div class="damage-info">
+                        <div class="damage-type">{{ item.damage_type }}</div>
+                        <div class="damage-severity {{ item.severity|lower }}">{{ item.severity }}</div>
+                    </div>
+                    <div class="cost-value">{{ "{:,.0f}".format(item.cost) }}</div>
+                </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="no-damages">
+            <div class="no-damages-icon">✓</div>
+            <p>No damages detected in the image</p>
+        </div>
+        {% endif %}
+
+        <div class="total-cost-container">
+            <h3>Total Estimated Repair Cost</h3>
+            <div class="total-cost-value">{{ "{:,.0f}".format(total_cost) }}</div>
+        </div>
+    </div>
+
+    <div class="button-group">
+        <a href="/" class="btn btn-secondary">← Back to Analysis</a>
+        <button class="btn btn-primary" onclick="window.print()">🖨️ Print Report</button>
+    </div>
+</div>
+
+</body>
+</html>

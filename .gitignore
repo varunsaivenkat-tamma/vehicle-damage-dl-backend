@@ -1,0 +1,26 @@
+# Virtual environments
+venv/
+car_damage_env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment variables
+.env
+
+# Model files & large AI artifacts
+*.h5
+*.pkl
+*.pt
+*.pth
+*.onnx
+*.weights
+
+# OS / IDE files
+.DS_Store
+.vscode/
+
+./car_damage_env
+./venv
+./__pycache__/
