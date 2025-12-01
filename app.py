@@ -37,8 +37,10 @@ try:
 
     damage_model = YOLO("Final_Damage/DamageTypebest.pt")  # YOLO model for damage type
     severity_model = YOLO("Final_Damage/Severitybest.pt")  # YOLO model for severity
-
-    cost_model = joblib.load("Final_Damage/cost_model.pkl")  # ML model
+    import gzip
+    with gzip.open("Final_Damage/cost_model.pkl.gz", "rb") as f:
+    cost_model = joblib.load(f)
+    # cost_model = joblib.load("Final_Damage/cost_model.pkl")  # ML model
     encoders = joblib.load("Final_Damage/label_encoders.pkl")  # Label encoders
     feature_cols = joblib.load("Final_Damage/feature_columns.pkl")  # Feature columns list
 
