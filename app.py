@@ -22,7 +22,7 @@ app = Flask(__name__)
 # CORS configuration – must be right after app init
 CORS(
     app,
-    origins=["https://vd-dlproject.vercel.app"],
+    origins=["*"],
     supports_credentials=True
 )
 
