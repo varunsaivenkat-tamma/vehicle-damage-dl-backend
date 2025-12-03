@@ -546,7 +546,7 @@ CORS(app, resources={
         "origins": [
             "http://localhost:5173",
             "https://vd-dlproject.vercel.app",
-            "https://vehicle-damage-dl-frontend.onrender.com",
+            "https://vd-dlproject.vercel.app/",
             "https://vehicle-damage-dl-backend.onrender.com"
         ],
         "supports_credentials": True,
