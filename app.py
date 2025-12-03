@@ -539,13 +539,19 @@ app = Flask(__name__)
 # ============================================
 # CORS
 # ============================================
-CORS(
-    app,
-    origins=["https://vd-dlproject.vercel.app", "*"],
-    supports_credentials=True,
-    allow_headers=["Content-Type", "Authorization"],
-    methods=["GET", "POST", "OPTIONS"],
-)
+CORS(app, resources={
+    r"/*": {
+        "origins": [
+            "http://localhost:5173",
+            "https://vehicle-damage-dl-frontend.onrender.com",
+            "https://vd-dlproject.vercel.app",
+            "https://vehicle-damage-dl-backend.onrender.com"
+        ],
+        "supports_credentials": True,
+        "allow_headers": ["Content-Type", "Authorization"],
+        "methods": ["GET", "POST", "OPTIONS"]
+    }
+})
 
 # ============================================
 # Correct Path Setup for Render Deployment
