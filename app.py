@@ -516,7 +516,6 @@ from flask_cors import CORS
 import cv2
 import numpy as np
 import joblib
-import pandas as pd
 from ultralytics import YOLO
 import os
 import uuid
@@ -525,7 +524,6 @@ import logging
 import gzip
 import time
 import psutil
-from threading import Thread
 import gc
 
 # ============================================
@@ -537,7 +535,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # ============================================
-# CORS
+# CORS CONFIG
 # ============================================
 CORS(app, resources={
     r"/*": {
@@ -554,12 +552,11 @@ CORS(app, resources={
 })
 
 # ============================================
-# Correct Path Setup for Render Deployment
+# PATHS
 # ============================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_DIR = os.path.join(BASE_DIR, "Final_Damage")
+MODEL_DIR = os.path.join(BASE_DIR, "Final_Damage")  # <--- Folder must exist and contain models
 
-# Make sure Render can find folders
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "static/uploads")
 RESULTS_FOLDER = os.path.join(BASE_DIR, "static/results")
 
@@ -567,7 +564,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(RESULTS_FOLDER, exist_ok=True)
 
 # ============================================
-# Globals
+# GLOBALS
 # ============================================
 damage_model = None
 severity_model = None
@@ -577,32 +574,16 @@ feature_cols = None
 models_loaded = False
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg"}
-
-app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 MB limit
-
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8MB
 
 # ============================================
-# Memory Utilities
+# MEMORY
 # ============================================
 def get_memory_usage():
     return psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
 
-
-def cleanup_old_files():
-    try:
-        now = time.time()
-        for folder in [UPLOAD_FOLDER, RESULTS_FOLDER]:
-            for f in os.listdir(folder):
-                fp = os.path.join(folder, f)
-                if os.path.isfile(fp) and now - os.path.getmtime(fp) > 3600:
-                    os.remove(fp)
-                    logger.info(f"Removed old file: {f}")
-    except:
-        pass
-
-
 # ============================================
-# 🟢 MODEL LOADING (THE MOST IMPORTANT FIX)
+# MODEL LOADING
 # ============================================
 def load_models():
     global damage_model, severity_model, cost_model, encoders, feature_cols, models_loaded
@@ -611,35 +592,30 @@ def load_models():
         return True
 
     try:
-        logger.info("Loading models...")
-
         gc.collect()
+        logger.info(f"MODEL_DIR: {MODEL_DIR}")
+        logger.info(f"Model files: {os.listdir(MODEL_DIR)}")
 
-        # ----------- FIXED MODEL PATHS -----------
         damage_path = os.path.join(MODEL_DIR, "DamageTypebest.pt")
         severity_path = os.path.join(MODEL_DIR, "Severitybest.pt")
         cost_path = os.path.join(MODEL_DIR, "cost_model.pkl.gz")
-        encoders_path = os.path.join(MODEL_DIR, "label_encoders.pkl")
+        encoder_path = os.path.join(MODEL_DIR, "label_encoders.pkl")
         feature_cols_path = os.path.join(MODEL_DIR, "feature_columns.pkl")
 
-        logger.info(f"Loading YOLO damage model from: {damage_path}")
+        logger.info("Loading YOLO models...")
         damage_model = YOLO(damage_path)
-
-        logger.info(f"Loading YOLO severity model from: {severity_path}")
         severity_model = YOLO(severity_path)
 
-        logger.info(f"Loading cost model from: {cost_path}")
+        logger.info("Loading cost model...")
         with gzip.open(cost_path, "rb") as f:
             cost_model = joblib.load(f)
 
-        logger.info(f"Loading encoders from: {encoders_path}")
-        encoders = joblib.load(encoders_path)
-
-        logger.info(f"Loading feature columns from: {feature_cols_path}")
+        logger.info("Loading encoders...")
+        encoders = joblib.load(encoder_path)
         feature_cols = joblib.load(feature_cols_path)
 
         models_loaded = True
-        logger.info("Models loaded successfully!")
+        logger.info("ALL MODELS LOADED SUCCESSFULLY")
         return True
 
     except Exception as e:
@@ -647,141 +623,95 @@ def load_models():
         models_loaded = False
         return False
 
-
 # ============================================
-# Helpers
+# HELPERS
 # ============================================
 def allowed_file(filename):
-    return "." in filename and filename.split(".")[-1].lower() in ALLOWED_EXTENSIONS
-
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def save_image(file):
     if not allowed_file(file.filename):
         return None
-
     filename = secure_filename(file.filename)
     unique = f"{uuid.uuid4()}_{filename}"
     path = os.path.join(UPLOAD_FOLDER, unique)
     file.save(path)
     return path
 
-
-def optimize_image(path):
-    try:
-        img = cv2.imread(path)
-        if img is None:
-            return path
-
-        h, w = img.shape[:2]
-        if h > 800 or w > 800:
-            img = cv2.resize(img, (800, 800))
-            cv2.imwrite(path, img)
-
-        return path
-    except:
-        return path
-
-
 # ============================================
-# Damage Analysis
+# DAMAGE ANALYSIS
 # ============================================
 def analyze_damage_optimized(img_path):
     try:
         img = cv2.imread(img_path)
         if img is None:
             return []
-
         pred = damage_model(img, conf=0.25, verbose=False)
-
         if len(pred[0].boxes) == 0:
             return []
 
         results = []
-
         for box in pred[0].boxes[:3]:
             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
             cls = int(box.cls[0])
             conf = float(box.conf[0])
             dmg_type = damage_model.names[cls]
 
-            severity = "minor"
+            sev = "minor"
             if conf > 0.75:
-                severity = "moderate"
+                sev = "moderate"
             if conf > 0.85:
-                severity = "high"
+                sev = "high"
 
             results.append({
                 "damage_type": dmg_type,
-                "severity": severity,
-                "confidence": round(conf, 2),
-                "box": [int(x1), int(y1), int(x2), int(y2)],
+                "severity": sev,
+                "confidence": conf,
+                "box": [int(x1), int(y1), int(x2), int(y2)]
             })
-
         return results
-
     except Exception as e:
         logger.error(f"Damage analysis error: {e}")
         return []
 
-
-# ============================================
-# Cost Estimation
-# ============================================
-def estimate_cost_optimized(damages, user_vehicle):
+def estimate_cost_optimized(damages, vehicle):
     if not damages:
         return 0
-
     base = {"minor": 2000, "moderate": 5000, "high": 15000}
-
-    total = 0
-    for d in damages:
-        severity = d["severity"]
-        total += base.get(severity, 2000)
-
-    return round(total, 2)
-
+    return sum(base[d["severity"]] for d in damages)
 
 # ============================================
-# Routes
+# ROUTES
 # ============================================
 @app.route("/")
 def home():
-    return jsonify({
-        "service": "Vehicle Damage Detection API",
-        "status": "running",
-        "models_loaded": models_loaded,
-    })
-
+    return jsonify({"service": "Vehicle Damage API", "status": "running", "models_loaded": models_loaded})
 
 @app.route("/health")
 def health():
     return jsonify({
         "status": "healthy" if models_loaded else "degraded",
         "models_loaded": models_loaded,
-        "memory": f"{get_memory_usage():.1f} MB",
+        "memory": f"{get_memory_usage():.1f} MB"
     }), 200 if models_loaded else 503
-
 
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
         if not models_loaded:
-            if not load_models():
-                return jsonify({"error": "Models not loaded"}), 503
+            load_models()
 
         if "image" not in request.files:
-            return jsonify({"error": "No image"}), 400
+            return jsonify({"error": "No image provided"}), 400
 
         img = request.files["image"]
         path = save_image(img)
         if not path:
-            return jsonify({"error": "Invalid image"}), 400
-
-        path = optimize_image(path)
+            return jsonify({"error": "Invalid file type"}), 400
 
         damages = analyze_damage_optimized(path)
 
-        user_vehicle = {
+        vehicle = {
             "brand": request.form.get("brand", "Toyota"),
             "model": request.form.get("model", "Fortuner"),
             "year": int(request.form.get("year", 2020)),
@@ -790,25 +720,26 @@ def predict():
             "color": request.form.get("color", "White"),
         }
 
-        total_cost = estimate_cost_optimized(damages, user_vehicle)
+        total_cost = estimate_cost_optimized(damages, vehicle)
 
         return jsonify({
             "success": True,
             "damage_count": len(damages),
-            "total_cost": total_cost,
             "damages": damages,
-            "vehicle_info": user_vehicle,
+            "total_cost": total_cost,
+            "vehicle_info": vehicle,
             "currency": "INR",
         })
 
     except Exception as e:
-        logger.error(f"Prediction error: {e}")
+        logger.error(f"Predict error: {e}")
         return jsonify({"error": "Prediction failed"}), 500
 
 
 # ============================================
-# Start Server
+# START SERVER
 # ============================================
 if __name__ == "__main__":
     load_models()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+
