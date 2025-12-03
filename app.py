@@ -511,32 +511,42 @@
 
 
 
+# app.py
+# Fixed backend - lazy model loading, CPU-only YOLO, clear logging, and safe CORS.
+# Replace your existing file with this and deploy.
+
+import os
+import gc
+import time
+import gzip
+import logging
+import uuid
+
+from threading import Thread
+from werkzeug.utils import secure_filename
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import cv2
-import numpy as np
-import joblib
-from ultralytics import YOLO
-import os
-import uuid
-from werkzeug.utils import secure_filename
-import logging
-import gzip
-import time
-import psutil
-import gc
 
-# ============================================
-# Logging Setup
-# ============================================
+# IMPORTANT: set this before importing/using models to avoid CUDA attempts
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")  # force CPU (empty = no GPU)
+
+# Import heavy libs after env tweak
+import cv2
+import joblib
+import psutil
+from ultralytics import YOLO  # ultralytics may still allocate memory on load -> handled carefully
+
+# -----------------------
+# Logging and app setup
+# -----------------------
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("vehicle-damage-api")
 
 app = Flask(__name__)
 
-# ============================================
-# CORS CONFIG
-# ============================================
+# -----------------------
+# CORS - explicit domains (no wildcard with supports_credentials)
+# -----------------------
 CORS(app, resources={
     r"/*": {
         "origins": [
@@ -551,21 +561,19 @@ CORS(app, resources={
     }
 })
 
-# ============================================
-# PATHS
-# ============================================
+# -----------------------
+# Paths and folders
+# -----------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_DIR = os.path.join(BASE_DIR, "Final_Damage")  # <--- Folder must exist and contain models
-
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "static/uploads")
-RESULTS_FOLDER = os.path.join(BASE_DIR, "static/results")
-
+MODEL_DIR = os.path.join(BASE_DIR, "Final_Damage")  # must match your folder name exactly
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "static", "uploads")
+RESULTS_FOLDER = os.path.join(BASE_DIR, "static", "results")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(RESULTS_FOLDER, exist_ok=True)
 
-# ============================================
-# GLOBALS
-# ============================================
+# -----------------------
+# Globals
+# -----------------------
 damage_model = None
 severity_model = None
 cost_model = None
@@ -574,58 +582,14 @@ feature_cols = None
 models_loaded = False
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg"}
-app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8MB
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 MB upload limit
 
-# ============================================
-# MEMORY
-# ============================================
-def get_memory_usage():
+# -----------------------
+# Helpers
+# -----------------------
+def get_memory_usage_mb():
     return psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
 
-# ============================================
-# MODEL LOADING
-# ============================================
-def load_models():
-    global damage_model, severity_model, cost_model, encoders, feature_cols, models_loaded
-
-    if models_loaded:
-        return True
-
-    try:
-        gc.collect()
-        logger.info(f"MODEL_DIR: {MODEL_DIR}")
-        logger.info(f"Model files: {os.listdir(MODEL_DIR)}")
-
-        damage_path = os.path.join(MODEL_DIR, "DamageTypebest.pt")
-        severity_path = os.path.join(MODEL_DIR, "Severitybest.pt")
-        cost_path = os.path.join(MODEL_DIR, "cost_model.pkl.gz")
-        encoder_path = os.path.join(MODEL_DIR, "label_encoders.pkl")
-        feature_cols_path = os.path.join(MODEL_DIR, "feature_columns.pkl")
-
-        logger.info("Loading YOLO models...")
-        damage_model = YOLO(damage_path)
-        severity_model = YOLO(severity_path)
-
-        logger.info("Loading cost model...")
-        with gzip.open(cost_path, "rb") as f:
-            cost_model = joblib.load(f)
-
-        logger.info("Loading encoders...")
-        encoders = joblib.load(encoder_path)
-        feature_cols = joblib.load(feature_cols_path)
-
-        models_loaded = True
-        logger.info("ALL MODELS LOADED SUCCESSFULLY")
-        return True
-
-    except Exception as e:
-        logger.error(f"MODEL LOADING FAILED: {e}")
-        models_loaded = False
-        return False
-
-# ============================================
-# HELPERS
-# ============================================
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -638,108 +602,276 @@ def save_image(file):
     file.save(path)
     return path
 
-# ============================================
-# DAMAGE ANALYSIS
-# ============================================
-def analyze_damage_optimized(img_path):
+def cleanup_old_files(max_age_seconds=3600):
+    """Delete files older than max_age_seconds in uploads/results to save disk."""
+    now = time.time()
+    for folder in (UPLOAD_FOLDER, RESULTS_FOLDER):
+        try:
+            for fname in os.listdir(folder):
+                fp = os.path.join(folder, fname)
+                if os.path.isfile(fp) and now - os.path.getmtime(fp) > max_age_seconds:
+                    os.remove(fp)
+                    logger.info(f"Removed old file: {fp}")
+        except Exception:
+            pass
+
+# -----------------------
+# Model loading (lazy, CPU-only)
+# -----------------------
+def load_models():
+    """
+    Try to load all models. Returns True on success, False on failure.
+    This function logs the precise exception so you can see memory / missing-file errors.
+    """
+    global damage_model, severity_model, cost_model, encoders, feature_cols, models_loaded
+
+    if models_loaded:
+        logger.info("Models already loaded - skipping.")
+        return True
+
+    logger.info("Attempting to load models...")
+    gc.collect()
+
+    # Print model dir + contents for debugging
+    logger.info(f"MODEL_DIR resolved to: {MODEL_DIR}")
+    if not os.path.exists(MODEL_DIR):
+        logger.error("MODEL_DIR does not exist. Check name/path.")
+        models_loaded = False
+        return False
+
     try:
+        files = os.listdir(MODEL_DIR)
+        logger.info(f"Files in MODEL_DIR: {files}")
+    except Exception as e:
+        logger.error(f"Could not list MODEL_DIR: {e}")
+        models_loaded = False
+        return False
+
+    # Compose paths
+    damage_path = os.path.join(MODEL_DIR, "DamageTypebest.pt")
+    severity_path = os.path.join(MODEL_DIR, "Severitybest.pt")
+    cost_path = os.path.join(MODEL_DIR, "cost_model.pkl.gz")
+    encoders_path = os.path.join(MODEL_DIR, "label_encoders.pkl")
+    feature_cols_path = os.path.join(MODEL_DIR, "feature_columns.pkl")
+
+    # Validate files exist before trying to load
+    for p in (damage_path, severity_path, cost_path, encoders_path, feature_cols_path):
+        if not os.path.exists(p):
+            logger.error(f"Required model file missing: {p}")
+            models_loaded = False
+            return False
+
+    try:
+        # Force CPU usage by re-setting env and letting ultralytics use CPU
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        logger.info("Creating YOLO(damage) model (CPU mode)...")
+        damage_model = YOLO(damage_path)  # keep this inside try/except
+        logger.info("Creating YOLO(severity) model (CPU mode)...")
+        severity_model = YOLO(severity_path)
+
+        logger.info("Loading compressed cost model...")
+        with gzip.open(cost_path, "rb") as f:
+            cost_model = joblib.load(f)
+
+        logger.info("Loading encoders and feature columns...")
+        encoders = joblib.load(encoders_path)
+        feature_cols = joblib.load(feature_cols_path)
+
+        models_loaded = True
+        logger.info("Models loaded successfully.")
+        return True
+
+    except MemoryError as me:
+        logger.error("MemoryError while loading models. Likely OOM on the host (not enough RAM).")
+        logger.error(str(me))
+        models_loaded = False
+        return False
+
+    except Exception as e:
+        # Catch any other exceptions (missing file, format, model incompatibility)
+        logger.error(f"Exception during model loading: {e}", exc_info=True)
+        models_loaded = False
+        return False
+
+# -----------------------
+# Simple analysis & cost (small, fast)
+# -----------------------
+def analyze_damage_fast(img_path):
+    """
+    Very simple/fast analysis to avoid heavy compute on the server.
+    Uses the loaded damage_model (YOLO) if available; otherwise returns empty.
+    """
+    global damage_model
+    try:
+        if damage_model is None:
+            logger.warning("damage_model is None - cannot analyze.")
+            return []
+
         img = cv2.imread(img_path)
         if img is None:
+            logger.error("Could not read uploaded image for analysis.")
             return []
-        pred = damage_model(img, conf=0.25, verbose=False)
-        if len(pred[0].boxes) == 0:
+
+        preds = damage_model(img, conf=0.25, verbose=False)
+        if len(preds) == 0 or len(preds[0].boxes) == 0:
             return []
 
         results = []
-        for box in pred[0].boxes[:3]:
+        # limit to top 3 detections to save CPU/memory/time
+        for box in preds[0].boxes[:3]:
             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
             cls = int(box.cls[0])
             conf = float(box.conf[0])
-            dmg_type = damage_model.names[cls]
-
+            label = damage_model.names[cls] if hasattr(damage_model, "names") else str(cls)
             sev = "minor"
             if conf > 0.75:
                 sev = "moderate"
             if conf > 0.85:
                 sev = "high"
-
             results.append({
-                "damage_type": dmg_type,
+                "damage_type": label,
                 "severity": sev,
-                "confidence": conf,
+                "confidence": round(conf, 2),
                 "box": [int(x1), int(y1), int(x2), int(y2)]
             })
         return results
+
     except Exception as e:
-        logger.error(f"Damage analysis error: {e}")
+        logger.error(f"Error in analyze_damage_fast: {e}", exc_info=True)
         return []
 
-def estimate_cost_optimized(damages, vehicle):
+def estimate_cost_simple(damages, vehicle_info):
     if not damages:
         return 0
     base = {"minor": 2000, "moderate": 5000, "high": 15000}
-    return sum(base[d["severity"]] for d in damages)
+    total = sum(base.get(d["severity"], 2000) for d in damages)
+    return round(total, 2)
 
-# ============================================
-# ROUTES
-# ============================================
+# -----------------------
+# Routes
+# -----------------------
 @app.route("/")
 def home():
-    return jsonify({"service": "Vehicle Damage API", "status": "running", "models_loaded": models_loaded})
+    return jsonify({
+        "service": "Vehicle Damage Detection API",
+        "status": "running",
+        "models_loaded": models_loaded,
+        "memory_mb": f"{get_memory_usage_mb():.1f}"
+    })
 
 @app.route("/health")
 def health():
+    """
+    Returns 200 when models_loaded==True, otherwise 503.
+    Frontend should treat models_loaded:False as 'degraded/starting' but the server is reachable.
+    """
     return jsonify({
         "status": "healthy" if models_loaded else "degraded",
         "models_loaded": models_loaded,
-        "memory": f"{get_memory_usage():.1f} MB"
+        "memory_mb": f"{get_memory_usage_mb():.1f}"
     }), 200 if models_loaded else 503
+
+@app.route("/load-models", methods=["POST", "GET"])
+def load_models_endpoint():
+    """
+    Manual trigger for loading models (useful when you want to load on-demand).
+    Example: POST https://your-backend/load-models
+    """
+    ok = load_models()
+    if ok:
+        return jsonify({"success": True, "message": "Models loaded"}), 200
+    else:
+        return jsonify({"success": False, "message": "Model loading failed - check logs"}), 500
 
 @app.route("/predict", methods=["POST"])
 def predict():
+    """
+    On first request this will attempt to load models. If the host cannot load (OOM), it
+    will return a friendly error. If models load successfully, it will perform a quick
+    detection and return cost estimate.
+    """
+    start = time.time()
+    # Lazy load: try to load models if not already loaded
+    if not models_loaded:
+        logger.info("models_loaded=False -> attempting to load models inside /predict")
+        if not load_models():
+            # If loading fails, return helpful message and logs advice
+            logger.error("Model loading failed inside /predict. Returning 503.")
+            return jsonify({
+                "success": False,
+                "error": "Models not available",
+                "message": "Server could not load AI models (likely insufficient memory or missing files). Check backend logs."
+            }), 503
+
+    # Validate image
+    if "image" not in request.files:
+        return jsonify({"success": False, "error": "No image provided"}), 400
+
+    file = request.files["image"]
+    if file.filename == "":
+        return jsonify({"success": False, "error": "Empty filename"}), 400
+
+    path = save_image(file)
+    if not path:
+        return jsonify({"success": False, "error": "Invalid file type"}), 400
+
+    # Run a quick analysis (limited detections)
+    results = analyze_damage_fast(path)
+
+    # Prepare vehicle info
+    vehicle = {
+        "brand": request.form.get("brand", "Toyota"),
+        "model": request.form.get("model", "Fortuner"),
+        "year": int(request.form.get("year", 2020)),
+        "fuel": request.form.get("fuel", "Petrol"),
+        "type": request.form.get("type", "SUV"),
+        "color": request.form.get("color", "White"),
+    }
+
+    total_cost = estimate_cost_simple(results, vehicle)
+
+    # Clean-up uploaded file after processing
     try:
-        if not models_loaded:
-            load_models()
+        os.remove(path)
+    except Exception:
+        pass
 
-        if "image" not in request.files:
-            return jsonify({"error": "No image provided"}), 400
+    elapsed = time.time() - start
+    logger.info(f"Predict completed in {elapsed:.2f}s - detections: {len(results)} - memory: {get_memory_usage_mb():.1f}MB")
 
-        img = request.files["image"]
-        path = save_image(img)
-        if not path:
-            return jsonify({"error": "Invalid file type"}), 400
+    return jsonify({
+        "success": True,
+        "damage_count": len(results),
+        "damages": results,
+        "total_cost": total_cost,
+        "vehicle_info": vehicle,
+        "currency": "INR",
+        "processing_time_s": round(elapsed, 2)
+    }), 200
 
-        damages = analyze_damage_optimized(path)
+# Static serving (optional)
+@app.route("/static/<path:path>")
+def serve_static(path):
+    return send_from_directory(os.path.join(BASE_DIR, "static"), path)
 
-        vehicle = {
-            "brand": request.form.get("brand", "Toyota"),
-            "model": request.form.get("model", "Fortuner"),
-            "year": int(request.form.get("year", 2020)),
-            "fuel": request.form.get("fuel", "Petrol"),
-            "type": request.form.get("type", "SUV"),
-            "color": request.form.get("color", "White"),
-        }
+# -----------------------
+# Background cleanup thread (keeps disk tidy)
+# -----------------------
+def periodic_cleanup():
+    while True:
+        try:
+            cleanup_old_files(max_age_seconds=3600)
+            gc.collect()
+        except Exception:
+            pass
+        time.sleep(1800)  # 30 minutes
 
-        total_cost = estimate_cost_optimized(damages, vehicle)
+cleanup_thread = Thread(target=periodic_cleanup, daemon=True)
+cleanup_thread.start()
 
-        return jsonify({
-            "success": True,
-            "damage_count": len(damages),
-            "damages": damages,
-            "total_cost": total_cost,
-            "vehicle_info": vehicle,
-            "currency": "INR",
-        })
-
-    except Exception as e:
-        logger.error(f"Predict error: {e}")
-        return jsonify({"error": "Prediction failed"}), 500
-
-
-# ============================================
-# START SERVER
-# ============================================
+# -----------------------
+# Entry point - do NOT load models here on start (avoid OOM)
+# -----------------------
 if __name__ == "__main__":
-    load_models()
+    logger.info("Starting server (models WILL be loaded lazily on first request or via /load-models).")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
-
