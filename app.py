@@ -514,7 +514,6 @@
 # app.py
 # Fixed backend - lazy model loading, CPU-only YOLO, clear logging, and safe CORS.
 # Replace your existing file with this and deploy.
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import cv2
@@ -611,22 +610,28 @@ def nms(boxes, scores, iou_threshold=0.5):
     while len(idxs) > 0:
         i = idxs[0]
         keep.append(i)
+
+        if len(idxs) == 1:
+            break
+
         xx1 = np.maximum(boxes[i][0], boxes[idxs[1:]][:, 0])
         yy1 = np.maximum(boxes[i][1], boxes[idxs[1:]][:, 1])
         xx2 = np.minimum(boxes[i][2], boxes[idxs[1:]][:, 2])
         yy2 = np.minimum(boxes[i][3], boxes[idxs[1:]][:, 3])
+
         w = np.maximum(0, xx2 - xx1)
         h = np.maximum(0, yy2 - yy1)
         inter = w * h
 
-        union = (
-            (boxes[i][2]-boxes[i][0]) * (boxes[i][3]-boxes[i][1]) +
-            (boxes[idxs[1:]][[:,2]] - boxes[idxs[1:]][:,0]) *
-            (boxes[idxs[1:]][[:,3]] - boxes[idxs[1:]][:,1]) - inter
-        )
+        area_i = (boxes[i][2] - boxes[i][0]) * (boxes[i][3] - boxes[i][1])
+        area_others = (boxes[idxs[1:]][:, 2] - boxes[idxs[1:]][:, 0]) * \
+                      (boxes[idxs[1:]][:, 3] - boxes[idxs[1:]][:, 1])
 
+        union = area_i + area_others - inter
         iou = inter / (union + 1e-6)
+
         idxs = idxs[1:][iou < iou_threshold]
+
     return keep
 
 def postprocess(outputs, conf=0.25):
@@ -717,3 +722,4 @@ def predict():
 if __name__ == "__main__":
     load_models()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+
