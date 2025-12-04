@@ -526,9 +526,7 @@ import uuid
 from werkzeug.utils import secure_filename
 import logging
 import gzip
-import time
 import psutil
-import gc
 
 # ============================================
 # LOGGING SETUP
@@ -549,9 +547,7 @@ CORS(app, resources={
             "https://vd-dlproject.vercel.app/",
             "https://vehicle-damage-dl-backend.onrender.com"
         ],
-        "supports_credentials": True,
-        "allow_headers": ["Content-Type", "Authorization"],
-        "methods": ["GET", "POST", "OPTIONS"]
+        "supports_credentials": True
     }
 })
 
@@ -572,8 +568,6 @@ os.makedirs(RESULTS_FOLDER, exist_ok=True)
 # ============================================
 damage_session = None
 severity_session = None
-damage_labels = {}
-severity_labels = {}
 cost_model = None
 encoders = None
 feature_cols = None
@@ -582,16 +576,9 @@ models_loaded = False
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg"}
 
 # ============================================
-# MEMORY CHECK
-# ============================================
-def get_memory_usage():
-    return psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
-
-# ============================================
 # YOLO ONNX HELPERS
 # ============================================
 def preprocess(image):
-    """Prepare image for ONNX YOLO model."""
     img = cv2.resize(image, (640, 640))
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     img = img.transpose(2, 0, 1)
@@ -635,31 +622,24 @@ def nms(boxes, scores, iou_threshold=0.5):
     return keep
 
 def postprocess(outputs, conf=0.25):
-    predictions = outputs[0]
-    predictions = predictions.squeeze(0)
+    predictions = outputs[0].squeeze(0)
 
     boxes = predictions[:, :4]
     scores = np.max(predictions[:, 4:], axis=1)
     classes = np.argmax(predictions[:, 4:], axis=1)
 
     mask = scores > conf
-    boxes = boxes[mask]
-    scores = scores[mask]
-    classes = classes[mask]
+    boxes, scores, classes = boxes[mask], scores[mask], classes[mask]
 
     boxes = xywh2xyxy(boxes)
-
     keep = nms(boxes, scores)
 
-    results = []
-    for i in keep:
-        results.append({
-            "box": boxes[i].tolist(),
-            "cls": int(classes[i]),
-            "conf": float(scores[i])
-        })
-
-    return results
+    return [{
+        "damage_type": str(classes[i]),
+        "severity": "low" if scores[i] < 0.75 else "medium" if scores[i] < 0.90 else "high",
+        "confidence": float(scores[i]),
+        "box": [int(v) for v in boxes[i]]
+    } for i in keep]
 
 # ============================================
 # MODEL LOADING
@@ -672,8 +652,6 @@ def load_models():
 
         damage_session = ort.InferenceSession(os.path.join(MODEL_DIR, "DamageTypebest.onnx"))
         severity_session = ort.InferenceSession(os.path.join(MODEL_DIR, "Severitybest.onnx"))
-
-        logger.info("ONNX models loaded successfully!")
 
         with gzip.open(os.path.join(MODEL_DIR, "cost_model.pkl.gz"), "rb") as f:
             cost_model = joblib.load(f)
@@ -691,47 +669,16 @@ def load_models():
         return False
 
 # ============================================
-# IMAGE HELPERS
+# UTILS
 # ============================================
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def save_image(file):
     filename = secure_filename(file.filename)
-    unique = f"{uuid.uuid4()}_{filename}"
-    path = os.path.join(UPLOAD_FOLDER, unique)
+    path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_{filename}")
     file.save(path)
     return path
-
-# ============================================
-# DAMAGE ANALYSIS (ONNX YOLO)
-# ============================================
-def analyze_damage_optimized(img_path):
-    img = cv2.imread(img_path)
-    if img is None:
-        return []
-
-    input_tensor = preprocess(img)
-    input_name = damage_session.get_inputs()[0].name
-    outputs = damage_session.run(None, {input_name: input_tensor})
-
-    detections = postprocess(outputs, conf=0.25)
-
-    return [{
-        "damage_type": str(det["cls"]),
-        "severity": "low" if det["conf"] < 0.75 else "medium" if det["conf"] < 0.90 else "high",
-        "confidence": det["conf"],
-        "box": [int(v) for v in det["box"]]
-    } for det in detections]
-
-# ============================================
-# COST ESTIMATION
-# ============================================
-def estimate_cost_optimized(damages, vehicle):
-    if not damages:
-        return 0
-    base = {"low": 2000, "medium": 5000, "high": 15000}
-    return sum(base[d["severity"]] for d in damages)
 
 # ============================================
 # ROUTES
@@ -739,6 +686,10 @@ def estimate_cost_optimized(damages, vehicle):
 @app.route("/")
 def home():
     return jsonify({"service": "Vehicle Damage API", "status": "running", "models_loaded": models_loaded})
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "healthy"})
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -749,28 +700,14 @@ def predict():
         if "image" not in request.files:
             return jsonify({"error": "No image provided"}), 400
 
-        img = request.files["image"]
-        path = save_image(img)
-
-        damages = analyze_damage_optimized(path)
-
-        vehicle = {
-            "brand": request.form.get("brand", "Toyota"),
-            "model": request.form.get("model", "Fortuner"),
-            "year": int(request.form.get("year", 2020)),
-            "fuel": request.form.get("fuel", "Petrol"),
-            "type": request.form.get("type", "SUV"),
-            "color": request.form.get("color", "White"),
-        }
-
-        total_cost = estimate_cost_optimized(damages, vehicle)
+        path = save_image(request.files["image"])
+        damages = postprocess(damage_session.run(None, {damage_session.get_inputs()[0].name: preprocess(cv2.imread(path))}))
 
         return jsonify({
             "success": True,
             "damage_count": len(damages),
             "damages": damages,
-            "total_cost": total_cost,
-            "vehicle_info": vehicle,
+            "total_cost": sum({"low":2000, "medium":5000, "high":15000}[d["severity"]] for d in damages),
             "currency": "INR"
         })
 
@@ -779,8 +716,20 @@ def predict():
         return jsonify({"error": "Prediction failed"}), 500
 
 # ============================================
+# FORCE CORS HEADERS
+# ============================================
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "https://vd-dlproject.vercel.app"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
+
+# ============================================
 # START SERVER
 # ============================================
 if __name__ == "__main__":
     load_models()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+
