@@ -520,7 +520,7 @@ from flask_cors import CORS
 import cv2
 import numpy as np
 import joblib
-from ultralytics import YOLO
+import onnxruntime as ort
 import os
 import uuid
 from werkzeug.utils import secure_filename
@@ -570,8 +570,10 @@ os.makedirs(RESULTS_FOLDER, exist_ok=True)
 # ============================================
 # GLOBALS
 # ============================================
-damage_model = None
-severity_model = None
+damage_session = None
+severity_session = None
+damage_labels = {}
+severity_labels = {}
 cost_model = None
 encoders = None
 feature_cols = None
@@ -586,35 +588,98 @@ def get_memory_usage():
     return psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
 
 # ============================================
+# YOLO ONNX HELPERS
+# ============================================
+def preprocess(image):
+    """Prepare image for ONNX YOLO model."""
+    img = cv2.resize(image, (640, 640))
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = img.transpose(2, 0, 1)
+    img = img[np.newaxis, :, :, :] / 255.0
+    return img.astype(np.float32)
+
+def xywh2xyxy(x):
+    y = np.zeros_like(x)
+    y[:, 0] = x[:, 0] - x[:, 2] / 2
+    y[:, 1] = x[:, 1] - x[:, 3] / 2
+    y[:, 2] = x[:, 0] + x[:, 2] / 2
+    y[:, 3] = x[:, 1] + x[:, 3] / 2
+    return y
+
+def nms(boxes, scores, iou_threshold=0.5):
+    idxs = scores.argsort()[::-1]
+    keep = []
+
+    while idxs.size > 0:
+        i = idxs[0]
+        keep.append(i)
+
+        xx1 = np.maximum(boxes[i][0], boxes[idxs[1:]][:, 0])
+        yy1 = np.maximum(boxes[i][1], boxes[idxs[1:]][:, 1])
+        xx2 = np.minimum(boxes[i][2], boxes[idxs[1:]][:, 2])
+        yy2 = np.minimum(boxes[i][3], boxes[idxs[1:]][:, 3])
+
+        w = np.maximum(0, xx2 - xx1)
+        h = np.maximum(0, yy2 - yy1)
+        inter = w * h
+
+        union = (
+            (boxes[i][2] - boxes[i][0]) * (boxes[i][3] - boxes[i][1])
+            + (boxes[idxs[1:]][:, 2] - boxes[idxs[1:]][:, 0]) * (boxes[idxs[1:]][:, 3] - boxes[idxs[1:]][:, 1])
+            - inter
+        )
+
+        iou = inter / (union + 1e-6)
+        idxs = idxs[1:][iou < iou_threshold]
+
+    return keep
+
+def postprocess(outputs, conf=0.25):
+    predictions = outputs[0]
+    predictions = predictions.squeeze(0)
+
+    boxes = predictions[:, :4]
+    scores = np.max(predictions[:, 4:], axis=1)
+    classes = np.argmax(predictions[:, 4:], axis=1)
+
+    mask = scores > conf
+    boxes = boxes[mask]
+    scores = scores[mask]
+    classes = classes[mask]
+
+    boxes = xywh2xyxy(boxes)
+
+    keep = nms(boxes, scores)
+
+    results = []
+    for i in keep:
+        results.append({
+            "box": boxes[i].tolist(),
+            "cls": int(classes[i]),
+            "conf": float(scores[i])
+        })
+
+    return results
+
+# ============================================
 # MODEL LOADING
 # ============================================
 def load_models():
-    global damage_model, severity_model, cost_model, encoders, feature_cols, models_loaded
+    global damage_session, severity_session, cost_model, encoders, feature_cols, models_loaded
 
     try:
         logger.info("========== MODEL LOADING STARTED ==========")
-        logger.info(f"MODEL_DIR Path: {MODEL_DIR}")
-        logger.info(f"Files in MODEL_DIR: {os.listdir(MODEL_DIR)}")
 
-        damage_path = os.path.join(MODEL_DIR, "DamageTypebest.pt")
-        severity_path = os.path.join(MODEL_DIR, "Severitybest.pt")
-        cost_path = os.path.join(MODEL_DIR, "cost_model.pkl.gz")
-        encoder_path = os.path.join(MODEL_DIR, "label_encoders.pkl")
-        feature_cols_path = os.path.join(MODEL_DIR, "feature_columns.pkl")
+        damage_session = ort.InferenceSession(os.path.join(MODEL_DIR, "DamageTypebest.onnx"))
+        severity_session = ort.InferenceSession(os.path.join(MODEL_DIR, "Severitybest.onnx"))
 
-        logger.info(f"Loading DamageType Model → {damage_path}")
-        damage_model = YOLO(damage_path)
+        logger.info("ONNX models loaded successfully!")
 
-        logger.info(f"Loading Severity Model → {severity_path}")
-        severity_model = YOLO(severity_path)
-
-        logger.info(f"Loading Cost Model → {cost_path}")
-        with gzip.open(cost_path, "rb") as f:
+        with gzip.open(os.path.join(MODEL_DIR, "cost_model.pkl.gz"), "rb") as f:
             cost_model = joblib.load(f)
 
-        logger.info("Loading Encoders + Feature Columns")
-        encoders = joblib.load(encoder_path)
-        feature_cols = joblib.load(feature_cols_path)
+        encoders = joblib.load(os.path.join(MODEL_DIR, "label_encoders.pkl"))
+        feature_cols = joblib.load(os.path.join(MODEL_DIR, "feature_columns.pkl"))
 
         models_loaded = True
         logger.info("🚀 ALL MODELS LOADED SUCCESSFULLY")
@@ -624,7 +689,6 @@ def load_models():
         logger.error(f"🔥 MODEL LOADING FAILED: {str(e)}")
         models_loaded = False
         return False
-
 
 # ============================================
 # IMAGE HELPERS
@@ -639,45 +703,26 @@ def save_image(file):
     file.save(path)
     return path
 
-
 # ============================================
-# DAMAGE ANALYSIS
+# DAMAGE ANALYSIS (ONNX YOLO)
 # ============================================
 def analyze_damage_optimized(img_path):
-    try:
-        img = cv2.imread(img_path)
-        if img is None:
-            return []
-
-        pred = damage_model(img, conf=0.25, verbose=False)
-        if len(pred[0].boxes) == 0:
-            return []
-
-        results = []
-        for box in pred[0].boxes[:3]:
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-            cls = int(box.cls[0])
-            conf = float(box.conf[0])
-            dmg_type = damage_model.names[cls]
-
-            sev = "minor"
-            if conf > 0.75:
-                sev = "moderate"
-            if conf > 0.85:
-                sev = "high"
-
-            results.append({
-                "damage_type": dmg_type,
-                "severity": sev,
-                "confidence": conf,
-                "box": [int(x1), int(y1), int(x2), int(y2)]
-            })
-        return results
-
-    except Exception as e:
-        logger.error(f"Damage analysis failed: {e}")
+    img = cv2.imread(img_path)
+    if img is None:
         return []
 
+    input_tensor = preprocess(img)
+    input_name = damage_session.get_inputs()[0].name
+    outputs = damage_session.run(None, {input_name: input_tensor})
+
+    detections = postprocess(outputs, conf=0.25)
+
+    return [{
+        "damage_type": str(det["cls"]),
+        "severity": "low" if det["conf"] < 0.75 else "medium" if det["conf"] < 0.90 else "high",
+        "confidence": det["conf"],
+        "box": [int(v) for v in det["box"]]
+    } for det in detections]
 
 # ============================================
 # COST ESTIMATION
@@ -685,9 +730,8 @@ def analyze_damage_optimized(img_path):
 def estimate_cost_optimized(damages, vehicle):
     if not damages:
         return 0
-    base = {"minor": 2000, "moderate": 5000, "high": 15000}
+    base = {"low": 2000, "medium": 5000, "high": 15000}
     return sum(base[d["severity"]] for d in damages)
-
 
 # ============================================
 # ROUTES
@@ -695,16 +739,6 @@ def estimate_cost_optimized(damages, vehicle):
 @app.route("/")
 def home():
     return jsonify({"service": "Vehicle Damage API", "status": "running", "models_loaded": models_loaded})
-
-
-@app.route("/health")
-def health():
-    return jsonify({
-        "status": "healthy" if models_loaded else "degraded",
-        "models_loaded": models_loaded,
-        "memory": f"{get_memory_usage():.1f} MB"
-    }), 200 if models_loaded else 503
-
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -744,11 +778,9 @@ def predict():
         logger.error(f"Prediction error: {e}")
         return jsonify({"error": "Prediction failed"}), 500
 
-
 # ============================================
 # START SERVER
 # ============================================
 if __name__ == "__main__":
     load_models()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
-
