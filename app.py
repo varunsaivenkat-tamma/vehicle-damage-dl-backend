@@ -528,7 +528,7 @@ import logging
 import gzip
 
 # ============================================
-# LOGGING SETUP
+# LOGGING
 # ============================================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -538,23 +538,29 @@ app = Flask(__name__)
 # ============================================
 # CORS CONFIG
 # ============================================
-CORS(app)
+ALLOWED_ORIGINS = [
+    "https://vd-dlproject.vercel.app",
+    "http://localhost:5173"
+]
 
-# Allow specific domains
-ALLOWED_ORIGIN = "https://vd-dlproject.vercel.app"
+CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGINS}}, supports_credentials=True)
 
 @app.after_request
 def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGIN
+    origin = request.headers.get("Origin")
+    if origin in ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     response.headers["Access-Control-Allow-Credentials"] = "true"
     return response
 
-# Handle preflight requests
-@app.route("/<path:path>", methods=["OPTIONS"])
-def options_handler(path):
-    return jsonify({"status": "OK"}), 200
+# Handle OPTIONS correctly
+@app.route("/health", methods=["OPTIONS"])
+@app.route("/predict", methods=["OPTIONS"])
+@app.route("/vehicle-brands", methods=["OPTIONS"])
+def handle_preflight():
+    return jsonify({"status": "ok"}), 200
 
 # ============================================
 # PATHS
@@ -581,7 +587,7 @@ models_loaded = False
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg"}
 
 # ============================================
-# ONNX PREPROCESS / POSTPROCESS
+# PREPROCESSING
 # ============================================
 def preprocess(image):
     img = cv2.resize(image, (640, 640))
@@ -615,8 +621,8 @@ def nms(boxes, scores, iou_threshold=0.5):
 
         union = (
             (boxes[i][2]-boxes[i][0]) * (boxes[i][3]-boxes[i][1]) +
-            (boxes[idxs[1:]][:,2] - boxes[idxs[1:]][:,0]) *
-            (boxes[idxs[1:]][:,3] - boxes[idxs[1:]][:,1]) - inter
+            (boxes[idxs[1:]][[:,2]] - boxes[idxs[1:]][:,0]) *
+            (boxes[idxs[1:]][[:,3]] - boxes[idxs[1:]][:,1]) - inter
         )
 
         iou = inter / (union + 1e-6)
@@ -643,7 +649,7 @@ def postprocess(outputs, conf=0.25):
     } for i in keep]
 
 # ============================================
-# MODEL LOADING
+# LOAD MODELS
 # ============================================
 def load_models():
     global damage_session, severity_session, cost_model, encoders, feature_cols, models_loaded
@@ -706,7 +712,7 @@ def predict():
         return jsonify({"error": "Prediction failed"}), 500
 
 # ============================================
-# START
+# START SERVER
 # ============================================
 if __name__ == "__main__":
     load_models()
