@@ -526,7 +526,6 @@ import uuid
 from werkzeug.utils import secure_filename
 import logging
 import gzip
-import psutil
 
 # ============================================
 # LOGGING SETUP
@@ -539,17 +538,23 @@ app = Flask(__name__)
 # ============================================
 # CORS CONFIG
 # ============================================
-CORS(app, resources={
-    r"/*": {
-        "origins": [
-            "http://localhost:5173",
-            "https://vd-dlproject.vercel.app",
-            "https://vd-dlproject.vercel.app/",
-            "https://vehicle-damage-dl-backend.onrender.com"
-        ],
-        "supports_credentials": True
-    }
-})
+CORS(app)
+
+# Allow specific domains
+ALLOWED_ORIGIN = "https://vd-dlproject.vercel.app"
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGIN
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
+
+# Handle preflight requests
+@app.route("/<path:path>", methods=["OPTIONS"])
+def options_handler(path):
+    return jsonify({"status": "OK"}), 200
 
 # ============================================
 # PATHS
@@ -576,7 +581,7 @@ models_loaded = False
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg"}
 
 # ============================================
-# YOLO ONNX HELPERS
+# ONNX PREPROCESS / POSTPROCESS
 # ============================================
 def preprocess(image):
     img = cv2.resize(image, (640, 640))
@@ -597,33 +602,29 @@ def nms(boxes, scores, iou_threshold=0.5):
     idxs = scores.argsort()[::-1]
     keep = []
 
-    while idxs.size > 0:
+    while len(idxs) > 0:
         i = idxs[0]
         keep.append(i)
-
         xx1 = np.maximum(boxes[i][0], boxes[idxs[1:]][:, 0])
         yy1 = np.maximum(boxes[i][1], boxes[idxs[1:]][:, 1])
         xx2 = np.minimum(boxes[i][2], boxes[idxs[1:]][:, 2])
         yy2 = np.minimum(boxes[i][3], boxes[idxs[1:]][:, 3])
-
         w = np.maximum(0, xx2 - xx1)
         h = np.maximum(0, yy2 - yy1)
         inter = w * h
 
         union = (
-            (boxes[i][2] - boxes[i][0]) * (boxes[i][3] - boxes[i][1])
-            + (boxes[idxs[1:]][:, 2] - boxes[idxs[1:]][:, 0]) * (boxes[idxs[1:]][:, 3] - boxes[idxs[1:]][:, 1])
-            - inter
+            (boxes[i][2]-boxes[i][0]) * (boxes[i][3]-boxes[i][1]) +
+            (boxes[idxs[1:]][:,2] - boxes[idxs[1:]][:,0]) *
+            (boxes[idxs[1:]][:,3] - boxes[idxs[1:]][:,1]) - inter
         )
 
         iou = inter / (union + 1e-6)
         idxs = idxs[1:][iou < iou_threshold]
-
     return keep
 
 def postprocess(outputs, conf=0.25):
     predictions = outputs[0].squeeze(0)
-
     boxes = predictions[:, :4]
     scores = np.max(predictions[:, 4:], axis=1)
     classes = np.argmax(predictions[:, 4:], axis=1)
@@ -646,10 +647,8 @@ def postprocess(outputs, conf=0.25):
 # ============================================
 def load_models():
     global damage_session, severity_session, cost_model, encoders, feature_cols, models_loaded
-
     try:
-        logger.info("========== MODEL LOADING STARTED ==========")
-
+        logger.info("LOADING MODELS...")
         damage_session = ort.InferenceSession(os.path.join(MODEL_DIR, "DamageTypebest.onnx"))
         severity_session = ort.InferenceSession(os.path.join(MODEL_DIR, "Severitybest.onnx"))
 
@@ -660,25 +659,10 @@ def load_models():
         feature_cols = joblib.load(os.path.join(MODEL_DIR, "feature_columns.pkl"))
 
         models_loaded = True
-        logger.info("🚀 ALL MODELS LOADED SUCCESSFULLY")
-        return True
-
+        logger.info("🚀 MODELS LOADED SUCCESSFULLY")
     except Exception as e:
-        logger.error(f"🔥 MODEL LOADING FAILED: {str(e)}")
+        logger.error(f"❌ MODEL LOADING FAILED: {str(e)}")
         models_loaded = False
-        return False
-
-# ============================================
-# UTILS
-# ============================================
-def allowed_file(filename):
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
-
-def save_image(file):
-    filename = secure_filename(file.filename)
-    path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_{filename}")
-    file.save(path)
-    return path
 
 # ============================================
 # ROUTES
@@ -689,7 +673,12 @@ def home():
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "healthy"})
+    return jsonify({"status": "healthy"}), 200
+
+@app.route("/vehicle-brands")
+def vehicle_brands():
+    brands = ["Toyota", "Honda", "Hyundai", "Suzuki", "Kia", "Mahindra", "Tata", "Ford"]
+    return jsonify(brands)
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -700,36 +689,25 @@ def predict():
         if "image" not in request.files:
             return jsonify({"error": "No image provided"}), 400
 
-        path = save_image(request.files["image"])
-        damages = postprocess(damage_session.run(None, {damage_session.get_inputs()[0].name: preprocess(cv2.imread(path))}))
+        file = request.files["image"]
+        filename = secure_filename(file.filename)
+        save_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_{filename}")
+        file.save(save_path)
 
-        return jsonify({
-            "success": True,
-            "damage_count": len(damages),
-            "damages": damages,
-            "total_cost": sum({"low":2000, "medium":5000, "high":15000}[d["severity"]] for d in damages),
-            "currency": "INR"
-        })
+        image = cv2.imread(save_path)
+        damages = postprocess(damage_session.run(None, {damage_session.get_inputs()[0].name: preprocess(image)}))
+
+        total_cost = sum({"low": 2000, "medium": 5000, "high": 15000}[d["severity"]] for d in damages)
+
+        return jsonify({"success": True, "damage_count": len(damages), "damages": damages, "total_cost": total_cost, "currency": "INR"})
 
     except Exception as e:
-        logger.error(f"Prediction error: {e}")
+        logger.error(f"Prediction error: {str(e)}")
         return jsonify({"error": "Prediction failed"}), 500
 
 # ============================================
-# FORCE CORS HEADERS
-# ============================================
-@app.after_request
-def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = "https://vd-dlproject.vercel.app"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-    response.headers["Access-Control-Allow-Credentials"] = "true"
-    return response
-
-# ============================================
-# START SERVER
+# START
 # ============================================
 if __name__ == "__main__":
     load_models()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
-
