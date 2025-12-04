@@ -695,7 +695,7 @@ def vehicle_brands():
 def predict():
     try:
         if not models_loaded:
-            load_models()
+    load_models()
 
         if "image" not in request.files:
             return jsonify({"error": "No image provided"}), 400
@@ -720,6 +720,7 @@ def predict():
 # START SERVER
 # ============================================
 if __name__ == "__main__":
-    load_models()
+    # load_models()   <- REMOVE from startup
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+
 
